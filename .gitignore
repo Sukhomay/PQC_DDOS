@@ -1,0 +1,7 @@
+liboqs/
+openssl/
+oqs-provider/
+Makefile
+server
+client
+bot

@@ -1,0 +1,17 @@
+[req]
+distinguished_name = dn
+x509_extensions = v3_req
+prompt = no
+
+[dn]
+C = IN
+ST = WestBengal
+L = Kharagpur
+O = IIT
+OU = CryptoLab
+CN = localhost
+
+[v3_req]
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
