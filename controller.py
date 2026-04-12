@@ -25,7 +25,7 @@ def run_attack(n_bots=5):
 
     net.start()
 
-    # 🔥 CRITICAL: set switch to standalone (learning mode)
+    # CRITICAL: set switch to standalone (learning mode)
     for s in net.switches:
         s.cmd('ovs-vsctl set-fail-mode', s.name, 'standalone')
 

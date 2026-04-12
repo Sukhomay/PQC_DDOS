@@ -1,3 +1,5 @@
+#include "SETUP.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,19 +10,8 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <time.h>
-
-#define PORT 4443
-
-/* ========================== */
-/* RDTSC TIMER */
-/* ========================== */
-static __inline__ uint64_t rdtscp() {
-    unsigned int lo, hi;
-    __asm__ __volatile__ (
-        "rdtscp" : "=a"(lo), "=d"(hi) :: "%rcx"
-    );
-    return ((uint64_t)hi << 32) | lo;
-}
+#include <signal.h>
+#include <errno.h>
 
 /* ========================== */
 /* GLOBAL METRICS */
@@ -62,11 +53,21 @@ SSL_CTX* create_context() {
 }
 
 void configure_context(SSL_CTX *ctx) {
-    SSL_CTX_use_certificate_file(ctx, "server.crt", SSL_FILETYPE_PEM);
-    SSL_CTX_use_PrivateKey_file(ctx, "server.key", SSL_FILETYPE_PEM);
+    if (SSL_CTX_use_certificate_file(ctx, CERT_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, KEY_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
 
     /* PQC group */
-    SSL_CTX_set1_groups_list(ctx, "mlkem768");
+    if (SSL_CTX_set1_groups_list(ctx, HANDSHAKE_ALGO) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
 
     if (!SSL_CTX_check_private_key(ctx)) {
         printf("Private key mismatch\n");
@@ -78,6 +79,8 @@ void configure_context(SSL_CTX *ctx) {
 /* METRICS LOGGER */
 /* ========================== */
 void* metrics_logger(void* arg) {
+    (void)arg;
+
     while (1) {
         sleep(2);
 
@@ -110,6 +113,12 @@ void* handle_client(void* arg) {
     free(args);
 
     SSL *ssl = SSL_new(ctx);
+    if (!ssl) {
+        ERR_print_errors_fp(stderr);
+        close(client);
+        return NULL;
+    }
+
     SSL_set_fd(ssl, client);
 
     pthread_mutex_lock(&lock);
@@ -123,6 +132,7 @@ void* handle_client(void* arg) {
         pthread_mutex_lock(&lock);
         failed_handshakes++;
         pthread_mutex_unlock(&lock);
+        ERR_print_errors_fp(stderr);
     } else {
         uint64_t end = rdtscp();
 
@@ -159,24 +169,56 @@ void* handle_client(void* arg) {
 int main() {
     int sock;
     struct sockaddr_in addr;
+    int opt = 1;
 
     init_openssl();
+    signal(SIGPIPE, SIG_IGN);
+
     SSL_CTX *ctx = create_context();
     configure_context(ctx);
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
 
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt");
+        close(sock);
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(sock, (struct sockaddr*)&addr, sizeof(addr));
-    listen(sock, 1000);
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sock);
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
 
-    printf("🚀 PQC TLS Server running on port %d...\n", PORT);
+    if (listen(sock, 1000) < 0) { // backlog of 1000 *****************************
+        perror("listen");
+        close(sock);
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("PQC TLS Server running on port %d...\n", PORT);
 
     pthread_t logger_thread;
-    pthread_create(&logger_thread, NULL, metrics_logger, NULL);
+    if (pthread_create(&logger_thread, NULL, metrics_logger, NULL) != 0) {
+        perror("pthread_create");
+        close(sock);
+        SSL_CTX_free(ctx);
+        exit(EXIT_FAILURE);
+    }
 
     while (1) {
         int client;
@@ -184,13 +226,33 @@ int main() {
         socklen_t len = sizeof(client_addr);
 
         client = accept(sock, (struct sockaddr*)&client_addr, &len);
+        if (client < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            perror("accept");
+            continue;
+        }
 
         client_args_t *args = malloc(sizeof(client_args_t));
+        if (!args) {
+            perror("malloc");
+            close(client);
+            continue;
+        }
+
         args->client_fd = client;
         args->ctx = ctx;
 
         pthread_t tid;
-        pthread_create(&tid, NULL, handle_client, args);
+        if (pthread_create(&tid, NULL, handle_client, args) != 0) {
+            perror("pthread_create");
+            close(client);
+            free(args);
+            continue;
+        }
+
         pthread_detach(tid);
     }
 
