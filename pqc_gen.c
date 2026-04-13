@@ -47,7 +47,7 @@ static EVP_PKEY *generate_private_key(const char *algorithm)
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *ctx = NULL;
 
-    ctx = EVP_PKEY_CTX_new_from_name(NULL, algorithm, "provider=oqsprovider");
+    ctx = EVP_PKEY_CTX_new_from_name(NULL, algorithm, NULL);
     if (ctx == NULL) {
         print_openssl_errors("Failed to create a key generation context for the requested algorithm.");
         return NULL;
@@ -107,7 +107,7 @@ static X509 *generate_self_signed_cert(EVP_PKEY *pkey)
         return NULL;
     }
 
-    name = X509_get_subject_name(cert);
+    name = (X509_NAME *)X509_get_subject_name(cert);
     if (name == NULL) {
         print_openssl_errors("Failed to get certificate subject.");
         X509_free(cert);
@@ -140,7 +140,7 @@ static X509 *generate_self_signed_cert(EVP_PKEY *pkey)
     if (!add_extension(cert, NID_basic_constraints, "critical,CA:FALSE") ||
         !add_extension(cert, NID_key_usage, "critical,digitalSignature,keyEncipherment") ||
         !add_extension(cert, NID_ext_key_usage, "serverAuth") ||
-        !add_extension(cert, NID_subject_alt_name, "DNS:localhost,IP:127.0.0.1")) {
+        !add_extension(cert, NID_subject_alt_name, "DNS:localhost,IP:127.0.0.1,IP:10.145.231.154")) {
         print_openssl_errors("Failed to add X509 extensions.");
         X509_free(cert);
         return NULL;

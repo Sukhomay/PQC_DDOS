@@ -81,8 +81,17 @@ void configure_context(SSL_CTX *ctx) {
 void* metrics_logger(void* arg) {
     (void)arg;
 
+    /* Write CSV header */
+    FILE *csv = fopen("metrics.csv", "w");
+    if (csv) {
+        fprintf(csv, "timestamp,total_connections,active_connections,"
+                      "successful_handshakes,failed_handshakes,"
+                      "avg_handshake_cycles\n");
+        fclose(csv);
+    }
+
     while (1) {
-        sleep(2);
+        sleep(1);
 
         pthread_mutex_lock(&lock);
 
@@ -97,6 +106,17 @@ void* metrics_logger(void* arg) {
         printf("Failed handshakes      : %lu\n", failed_handshakes);
         printf("Avg handshake cycles   : %lu\n", avg_cycles);
         printf("============================\n\n");
+
+        /* Append to CSV */
+        csv = fopen("metrics.csv", "a");
+        if (csv) {
+            fprintf(csv, "%ld,%lu,%lu,%lu,%lu,%lu\n",
+                    (long)time(NULL),
+                    total_connections, active_connections,
+                    successful_handshakes, failed_handshakes,
+                    avg_cycles);
+            fclose(csv);
+        }
 
         pthread_mutex_unlock(&lock);
     }
