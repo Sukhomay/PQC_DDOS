@@ -19,19 +19,11 @@ $(CLIENT): client.c
 
 
 pqc-all:
-	LD_LIBRARY_PATH=$HOME/oqs/openssl/lib64:$HOME/oqs/openssl/lib \
-	OPENSSL_MODULES=$HOME/oqs/openssl/lib64/ossl-modules \
-	OPENSSL_CONF=$HOME/oqs/openssl/ssl/openssl.cnf \
-	
 	gcc pqc_server.c -o server -lssl -lcrypto -lpthread
 	gcc pqc_bot.c -o bot -lssl -lcrypto -lpthread
 
 pqc-gen:
-	gcc -Wall -Wextra -O0 -I$HOME/oqs/openssl/include pqc_gen.c -L$HOME/oqs/openssl/lib64 -lssl -lcrypto -o pqc_gen
-
-	LD_LIBRARY_PATH=$HOME/oqs/openssl/lib64:$HOME/oqs/openssl/lib \
-	OPENSSL_MODULES=$HOME/oqs/openssl/lib64/ossl-modules \
-	OPENSSL_CONF=$HOME/oqs/openssl/ssl/openssl.cnf \
+	gcc -Wall -Wextra -O0 pqc_gen.c -lssl -lcrypto -o pqc_gen
 	./pqc_gen mldsa44 server.crt server.key
 
 
