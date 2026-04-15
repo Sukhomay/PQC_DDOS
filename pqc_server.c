@@ -99,13 +99,13 @@ void* metrics_logger(void* arg) {
         if (successful_handshakes > 0)
             avg_cycles = total_handshake_cycles / successful_handshakes;
 
-        printf("\n====== SERVER METRICS ======\n");
-        printf("Total connections      : %lu\n", total_connections);
-        printf("Active connections     : %lu\n", active_connections);
-        printf("Successful handshakes  : %lu\n", successful_handshakes);
-        printf("Failed handshakes      : %lu\n", failed_handshakes);
-        printf("Avg handshake cycles   : %lu\n", avg_cycles);
-        printf("============================\n\n");
+        // printf("\n====== SERVER METRICS ======\n");
+        // printf("Total connections      : %lu\n", total_connections);
+        // printf("Active connections     : %lu\n", active_connections);
+        // printf("Successful handshakes  : %lu\n", successful_handshakes);
+        // printf("Failed handshakes      : %lu\n", failed_handshakes);
+        // printf("Avg handshake cycles   : %lu\n", avg_cycles);
+        // printf("============================\n\n");
 
         /* Append to CSV */
         csv = fopen("metrics.csv", "a");
@@ -162,14 +162,14 @@ void* handle_client(void* arg) {
         pthread_mutex_unlock(&lock);
 
         /* optional read/write */
-        char buffer[1024];
-        int bytes = SSL_read(ssl, buffer, sizeof(buffer)-1);
+        // char buffer[1024];
+        // int bytes = SSL_read(ssl, buffer, sizeof(buffer)-1);
 
-        if (bytes > 0) {
-            buffer[bytes] = '\0';
-        }
+        // if (bytes > 0) {
+        //     buffer[bytes] = '\0';
+        // }
 
-        SSL_write(ssl, "Hello from PQC TLS server\n", 26);
+        // SSL_write(ssl, "Hello from PQC TLS server\n", 26);
     }
 
     SSL_shutdown(ssl);

