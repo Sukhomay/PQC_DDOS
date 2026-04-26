@@ -83,6 +83,12 @@ handshake_result_t do_handshake(SSL_CTX *ctx, const char *server_ip) {
         return result;
     }
 
+    // /* Set 5-second send/recv timeouts so we don't block forever
+    //    when the server is overwhelmed during DDoS */
+    // struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    // setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    // setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -111,12 +117,12 @@ handshake_result_t do_handshake(SSL_CTX *ctx, const char *server_ip) {
     uint64_t start = rdtscp();
 
     if (SSL_connect(ssl) <= 0) {
-        printf("SSL_connect failed\n"); 
+        // printf("SSL_connect failed\n"); 
         uint64_t end = rdtscp();
         result.cycles = end - start;
         result.success = 0;
     } else {
-        printf("SSL_connect success\n");
+        // printf("SSL_connect success\n");
         uint64_t end = rdtscp();
         result.cycles = end - start;
         result.success = 1;
@@ -162,28 +168,28 @@ int main(int argc, char **argv) {
     fprintf(csv, "timestamp,handshake_num,status,handshake_cycles\n");
     fflush(csv);
 
-    printf("PQC TLS Client starting...\n");
-    printf("  Target       : %s:%d\n", server_ip, PORT);
-    printf("  Interval     : %d ms\n", interval_ms);
-    printf("  Count        : %s\n", count == 0 ? "infinite" : argv[3]);
-    printf("  KEM          : %s\n", HANDSHAKE_ALGO);
-    printf("  Cert         : %s\n", CERT_FILE);
-    printf("----------------------------------\n");
+    // printf("PQC TLS Client starting...\n");
+    // printf("  Target       : %s:%d\n", server_ip, PORT);
+    // printf("  Interval     : %d ms\n", interval_ms);
+    // printf("  Count        : %s\n", count == 0 ? "infinite" : argv[3]);
+    // printf("  KEM          : %s\n", HANDSHAKE_ALGO);
+    // printf("  Cert         : %s\n", CERT_FILE);
+    // printf("----------------------------------\n");
 
     uint64_t total_success = 0;
     uint64_t total_fail = 0;
     uint64_t total_cycles = 0;
     int handshake_num = 0;
-    printf("count: %d\n", count);
+    // printf("count: %d\n", count);
     while (keep_running) {
         if (count > 0 && handshake_num >= count) break;
 
         handshake_num++;
-        printf("handshake %d\n", handshake_num);
+        // printf("handshake %d\n", handshake_num);
         handshake_result_t res = do_handshake(ctx, server_ip);
 
         const char *status_str = res.success ? "success" : "fail";
-        printf("handshake %d: %s\n", handshake_num, status_str);    
+        // printf("handshake %d: %s\n", handshake_num, status_str);    
         /* Write to CSV */
         fprintf(csv, "%ld,%d,%s,%lu\n",
                 (long)time(NULL), handshake_num,
