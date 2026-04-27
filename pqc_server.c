@@ -66,6 +66,7 @@ SSL_CTX* create_context() {
 }
 
 void configure_context(SSL_CTX *ctx) {
+	SSL_CTX_set_options(ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
     if (SSL_CTX_use_certificate_file(ctx, CERT_FILE, SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
