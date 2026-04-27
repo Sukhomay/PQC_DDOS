@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 #define PORT 4443
-#define HANDSHAKE_ALGO "X25519"
-#define SIGNATURE_ALGO "ED25519"
+#define HANDSHAKE_ALGO "p384_mlkem768"
+#define SIGNATURE_ALGO "p384_mldsa65"
 #define CERT_FILE "server.crt"
 #define KEY_FILE "server.key"
 

@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/provider.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <time.h>
@@ -38,6 +39,18 @@ typedef struct {
 void init_openssl() {
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
+
+    /* Load providers so hybrid PQC signature algorithms are recognized */
+    if (OSSL_PROVIDER_load(NULL, "default") == NULL) {
+        fprintf(stderr, "Failed to load default provider\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (OSSL_PROVIDER_load(NULL, "oqsprovider") == NULL) {
+        fprintf(stderr, "Failed to load OQS provider\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
 }
 
 SSL_CTX* create_context() {

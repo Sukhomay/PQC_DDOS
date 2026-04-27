@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/provider.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -138,6 +139,18 @@ int main(int argc, char **argv)
 
     SSL_library_init();
     SSL_load_error_strings();
+
+    /* Load providers so hybrid PQC signature algorithms are recognized */
+    if (OSSL_PROVIDER_load(NULL, "default") == NULL) {
+        fprintf(stderr, "Failed to load default provider\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (OSSL_PROVIDER_load(NULL, "oqsprovider") == NULL) {
+        fprintf(stderr, "Failed to load OQS provider\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
 
     ctx = SSL_CTX_new(TLS_client_method());
 
