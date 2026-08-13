@@ -166,7 +166,7 @@ void* handle_client(void* arg) {
         pthread_mutex_lock(&lock);
         failed_handshakes++;
         pthread_mutex_unlock(&lock);
-        ERR_print_errors_fp(stderr);
+        // ERR_print_errors_fp(stderr); /* suppress noise during DDoS */
     } else {
         uint64_t end = rdtscp();
 

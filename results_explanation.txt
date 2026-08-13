@@ -1,0 +1,335 @@
+
+================================================================================
+                  RESULTS AND DISCUSSION
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. Breaking Point Comparison (breaking_point_comparison.png)
+--------------------------------------------------------------------------------
+
+Figure X presents a horizontal bar chart comparing the DDoS resilience of all
+five cryptographic configurations, quantified by the number of concurrent
+attackers required to cause an 80% handshake failure rate on the server — the
+defined "breaking point."
+
+The results reveal a clear hierarchy of resilience that directly correlates
+with the computational cost of each algorithm's TLS handshake:
+
+  - X25519 (Classical) exhibited the highest resilience, withstanding
+    approximately 24,960 concurrent attackers before reaching the failure
+    threshold. This is expected, as X25519 performs only a single
+    elliptic-curve scalar multiplication during key exchange, which is the
+    least computationally expensive operation among all tested algorithms.
+
+  - ML-KEM-768 (Pure PQC, Security Level 3) reached its breaking point at
+    approximately 18,080 attackers. While the lattice-based key encapsulation
+    mechanism introduces additional overhead compared to X25519, the absence
+    of a secondary classical key exchange keeps the per-handshake cost
+    moderate.
+
+  - ML-KEM-1024 (Pure PQC, Security Level 5) failed at approximately 15,080
+    attackers. The larger lattice parameters (1024 vs. 768) require more
+    computation for key generation, encapsulation, and decapsulation, reducing
+    the server's capacity to handle concurrent handshakes.
+
+  - SecP384r1 + ML-KEM-768 (Hybrid PQC) reached its breaking point at 6,400
+    attackers. The hybrid mode requires the server to perform both a P-384
+    elliptic-curve Diffie-Hellman exchange and an ML-KEM-768 key
+    encapsulation within a single handshake, approximately doubling the
+    cryptographic workload compared to either algorithm alone.
+
+  - SecP521r1 + ML-KEM-1024 (Hybrid PQC, Highest Security) was the least
+    resilient, failing at only 3,200 attackers. This configuration combines
+    the most expensive classical curve (P-521) with the heaviest PQC
+    parameters (ML-KEM-1024), resulting in the highest per-handshake
+    computational cost.
+
+The ratio between the most resilient (X25519, 24,960) and least resilient
+(SecP521r1+ML-KEM-1024, 3,200) configurations is approximately 7.8x. This
+demonstrates that the choice of key exchange algorithm has a profound impact
+on a TLS server's ability to withstand handshake-flooding DDoS attacks. The
+hybrid configurations, while offering the strongest cryptographic security
+guarantees (combining classical and post-quantum resistance), are
+approximately 3-4 times more vulnerable to DDoS than their pure PQC
+counterparts, and nearly 8 times more vulnerable than classical X25519.
+
+The hatched bars in the figure indicate algorithm configurations where the
+breaking point was determined using the adaptive heuristic probing strategy,
+as the server did not reach the 80% failure threshold within the directly
+tested attacker range due to resource constraints on the attack machine. The
+solid bars represent directly observed breaking points from experimental data.
+
+
+--------------------------------------------------------------------------------
+2. Client-Side Handshake Latency Analysis
+   (comparison_plot.png and comparison_plot_2.png)
+--------------------------------------------------------------------------------
+
+Figures Y and Z present the client-side handshake latency (measured in CPU
+cycles via RDTSCP) across the three experimental phases: baseline (handshakes
+0-15), DDoS attack (handshakes 15-30), and recovery (handshakes 30+). Two
+separate plots are provided because the hybrid PQC algorithms exhibit
+handshake cycle counts an order of magnitude higher than the pure PQC and
+classical algorithms, making it difficult to compare all five on a single
+linear-scale plot.
+
+Figure Y (comparison_plot.png) — Pure PQC and Classical Algorithms:
+
+This plot compares ML-KEM-768, ML-KEM-1024, and X25519 (Classical). During
+the baseline phase (handshakes 0 through 15), all three algorithms exhibit
+stable, low handshake cycle counts, with ML-KEM-1024 showing slightly higher
+baseline latency than ML-KEM-768, and X25519 being the lowest. This reflects
+the inherent computational cost differences between the algorithms in a
+no-contention environment.
+
+Upon the onset of the DDoS attack at handshake 15, all three algorithms show
+a dramatic increase in handshake latency. ML-KEM-1024 exhibits the highest
+peak latency during the attack phase, reaching approximately 5.4 x 10^8
+cycles, followed by ML-KEM-768 at approximately 4.0 x 10^8 cycles, and
+X25519 (Classical) at approximately 2.5 x 10^8 cycles. The ordering is
+consistent throughout the attack phase: ML-KEM-1024 > ML-KEM-768 > X25519.
+
+The latency increase during the attack is caused by the server's thread pool
+becoming saturated. Each legitimate client handshake must compete with
+thousands of bot handshakes for server CPU time, leading to queuing delays
+that manifest as elevated cycle counts on the client side. The heavier
+algorithms (ML-KEM-1024, ML-KEM-768) cause each server thread to hold CPU
+resources for longer, amplifying the queuing effect.
+
+Upon cessation of the DDoS attack at handshake 30, all three algorithms
+immediately return to near-baseline latency levels. This sharp recovery
+demonstrates that the server does not suffer lasting damage from the attack
+— once the malicious load is removed, normal service resumes within a single
+handshake interval. The recovery is equally fast across all three algorithms,
+indicating that the attack did not corrupt server state or deplete
+non-renewable resources.
+
+Figure Z (comparison_plot_2.png) — All Five Algorithms Including Hybrids:
+
+This plot includes all five algorithm configurations on the same axes,
+revealing the scale disparity between hybrid and non-hybrid algorithms.
+The hybrid configurations (P521+ML-KEM-1024 and P384+ML-KEM-768) dominate
+the y-axis, with peak attack-phase latencies reaching approximately
+7.0 x 10^9 cycles and 4.5 x 10^9 cycles respectively. In contrast, the
+pure PQC and classical algorithms (ML-KEM-768, ML-KEM-1024, X25519) are
+nearly indistinguishable near the x-axis at this scale, clustered below
+5.0 x 10^8 cycles.
+
+This order-of-magnitude difference motivated the creation of the separate
+comparison_plot.png to allow meaningful visual comparison among the pure PQC
+and classical algorithms. The combined plot serves to illustrate the
+fundamental cost difference that hybrid key exchange introduces: the
+requirement to perform two independent cryptographic operations (classical
+ECDH + lattice-based KEM) results in handshake latencies 10-15 times higher
+than pure PQC algorithms during DDoS conditions.
+
+P521+ML-KEM-1024 consistently exhibits higher latency than P384+ML-KEM-768
+throughout the attack phase. This is attributable to two factors: the P-521
+curve requires significantly more computation than P-384 (due to the larger
+field size), and ML-KEM-1024 is heavier than ML-KEM-768. The combined effect
+is multiplicative, not merely additive.
+
+Both hybrid algorithms also show immediate recovery upon attack cessation,
+confirming the same stateless recovery behaviour observed in the pure PQC
+algorithms.
+
+
+--------------------------------------------------------------------------------
+3. Server-Side Average Handshake Cycle Analysis
+   (comparison_server_plot.png and comparison_server_plot_1.png)
+--------------------------------------------------------------------------------
+
+Figures A and B present the server-side view of handshake performance, showing
+the cumulative average handshake cycles recorded by the server's internal
+metrics logger. These plots complement the client-side latency analysis by
+providing the server's perspective on workload and resource consumption.
+
+Important note on metric interpretation: The server's avg_handshake_cycles
+metric is a cumulative running average (total_handshake_cycles divided by
+successful_handshakes since server start), not a per-second or sliding-window
+average. This means the metric integrates all historical handshake latencies,
+causing it to stabilise as a plateau rather than returning to baseline after
+the attack ends. The plateau effect is an artefact of the cumulative averaging
+and does not indicate that the server is still under stress.
+
+Figure A (comparison_server_plot.png) — Pure PQC and Classical Algorithms:
+
+This plot shows the server-side metrics for ML-KEM-768, ML-KEM-1024, and
+X25519. During the baseline phase (time 0-15), the cumulative averages
+converge rapidly to their baseline values. ML-KEM-1024 shows a briefly
+elevated average in the first few seconds due to the initial handshake cost
+before the running average stabilises.
+
+At the attack onset (time 15), all three curves exhibit a sharp step increase
+as the server begins processing thousands of bot handshakes. The cumulative
+average rises steeply over a few seconds and then stabilises at an elevated
+plateau. The plateau values reflect the overall mix of fast baseline
+handshakes and slow attack-phase handshakes.
+
+ML-KEM-1024 plateaus at approximately 3.7 x 10^7 cycles, ML-KEM-768 at
+approximately 3.5 x 10^7 cycles, and X25519 at approximately 2.6 x 10^7
+cycles. The ordering (ML-KEM-1024 > ML-KEM-768 > X25519) is consistent with
+the per-handshake cost expectations.
+
+After the attack ends (time 30), the cumulative averages do not decrease
+noticeably. This is because the post-attack handshakes are fast but
+contribute only incrementally to the cumulative average, which is already
+dominated by the large number of slow handshakes that occurred during the
+attack phase. The slight downward trend visible in some curves after time 30
+represents the gradual dilution of attack-phase latency by fast post-attack
+handshakes.
+
+Figure B (comparison_server_plot_1.png) — All Five Algorithms Including
+Hybrids:
+
+This plot includes all five algorithms, revealing the dramatic scale
+difference on the server side. The hybrid algorithms (P521+ML-KEM-1024 and
+P384+ML-KEM-768) exhibit cumulative averages in the range of 3.0-4.0 x 10^9
+cycles — approximately 100 times higher than the pure PQC and classical
+algorithms, which cluster near the baseline of the y-axis at this scale.
+
+P521+ML-KEM-1024 reaches the highest cumulative average at approximately
+3.6 x 10^9 cycles, followed by P384+ML-KEM-768 at approximately
+3.0 x 10^9 cycles. The step increase for the hybrid algorithms is
+particularly steep, rising from near-zero to their plateau values within
+approximately 5 seconds of the attack start. This rapid escalation reflects
+the extreme per-handshake cost: each bot handshake involving a hybrid key
+exchange consumes a disproportionate amount of CPU time, causing the
+cumulative average to be dominated very quickly by the attack-phase entries.
+
+The pure PQC (ML-KEM-768, ML-KEM-1024) and classical (X25519) algorithms
+are effectively flat at this scale, appearing as thin lines near the x-axis.
+This does not mean they are unaffected — as shown in Figure A, they do
+experience meaningful latency increases — but the absolute magnitude of their
+latency is two orders of magnitude smaller than the hybrid algorithms.
+
+This difference underscores a critical finding: hybrid PQC configurations
+not only fail at lower attacker counts (as shown in the breaking point
+comparison) but also impose dramatically higher computational cost on the
+server for every individual handshake, whether legitimate or malicious. In
+a DDoS scenario, this creates a severe asymmetry: each bot connection
+consumes far more server resources with hybrid PQC than with classical
+algorithms, amplifying the effectiveness of the attack.
+
+
+================================================================================
+                  PARTIAL HANDSHAKE (MODE 2) RESULTS
+================================================================================
+
+The partial handshake attack (Mode 2) represents a fundamentally different
+DDoS strategy compared to the full handshake flood (Mode 1) used in the
+preceding experiments. While Mode 1 targets CPU exhaustion through continuous
+cryptographic computation, Mode 2 targets resource exhaustion through
+connection holding — a strategy conceptually similar to the well-known
+Slowloris attack.
+
+In Mode 2, each bot thread connects to the server, completes the initial
+TLS handshake, and then holds the connection open indefinitely without
+sending further data or closing the socket. The bot process sleeps for an
+extended duration (100 seconds), tying up a server thread and file descriptor
+for the entire period. This shifts the attack vector from computational
+overload to connection-slot starvation: the server's thread pool and OS-level
+file descriptor table become the bottleneck rather than its CPU.
+
+
+--------------------------------------------------------------------------------
+4. Partial Handshake — Client-Side Latency Analysis
+   (partial/comparison_plot.png and partial/comparison_plot_1.png)
+--------------------------------------------------------------------------------
+
+Figures C and D present the client-side handshake latency under a partial
+handshake DDoS attack for the same five cryptographic configurations tested
+previously.
+
+Figure C (partial/comparison_plot.png) — Pure PQC and Classical Algorithms:
+
+This plot compares ML-KEM-768, ML-KEM-1024, and X25519 under the partial
+handshake attack. The most striking difference from the full handshake flood
+results is the shape of the latency response:
+
+  Baseline phase (handshakes 0-15): All three algorithms exhibit stable,
+  low handshake latency consistent with their intrinsic computational costs.
+  ML-KEM-1024 shows slightly higher baseline values (~12-20 million cycles)
+  than ML-KEM-768 (~10-14 million cycles) and X25519 (~9-10 million cycles),
+  matching the baseline behaviour observed in the full handshake experiments.
+
+  Attack onset (handshake ~17): A sharp, single-sample spike is visible for
+  all algorithms. ML-KEM-1024 peaks at approximately 2.03 x 10^8 cycles,
+  ML-KEM-768 at approximately 8.5 x 10^7 cycles, and X25519 at approximately
+  2.5 x 10^7 cycles. This spike corresponds to the exact moment when all
+  400 bot threads simultaneously establish their TLS connections, creating a
+  brief burst of concurrent cryptographic operations on the server. The
+  ordering of spike magnitude (ML-KEM-1024 > ML-KEM-768 > X25519) reflects
+  the per-handshake computational cost of each algorithm during this
+  momentary CPU contention.
+
+  During and after attack (handshakes 18-46): Critically, the latency
+  immediately returns to baseline levels and remains there for the entire
+  duration of the attack phase and recovery phase. This is the defining
+  characteristic of the partial handshake attack: once the bots have
+  completed their handshakes and entered the sleep state, they consume no
+  server CPU. The server's processing capacity is entirely available for
+  legitimate client connections, resulting in normal handshake latencies
+  indistinguishable from the pre-attack baseline.
+
+  This behaviour stands in stark contrast to the full handshake flood
+  (Mode 1), where latency remained elevated at 3-5 x 10^8 cycles
+  throughout the entire 15-second attack phase. The difference confirms
+  that the partial handshake attack does not impose sustained CPU pressure
+  on the server.
+
+Figure D (partial/comparison_plot_1.png) — All Five Algorithms Including
+Hybrids:
+
+This plot includes all five algorithm configurations and reveals the
+familiar scale disparity between hybrid and non-hybrid algorithms. The
+hybrid configurations exhibit dramatically larger initial spikes:
+
+  P521+ML-KEM-1024 produces a spike of approximately 1.63 x 10^10 cycles at
+  handshake 17. This is the largest spike observed across all algorithms and
+  reflects the extreme computational cost of simultaneously processing 400
+  hybrid handshakes, each requiring both a P-521 ECDH exchange and an
+  ML-KEM-1024 key encapsulation.
+
+  P384+ML-KEM-768 produces a spike of approximately 9.1 x 10^9 cycles,
+  followed by a secondary elevated point of approximately 2.6 x 10^9 cycles
+  at handshake 18 before returning to baseline. The secondary elevation
+  suggests that the server's thread pool took slightly longer to fully drain
+  the backlog of concurrent bot handshakes for this algorithm compared to
+  the lighter configurations.
+
+  The pure PQC and classical algorithms (ML-KEM-768, ML-KEM-1024, X25519)
+  appear as flat lines near the x-axis at this scale, with their spikes
+  being two orders of magnitude smaller than the hybrid algorithms.
+
+After the initial burst, all five algorithms return to their respective
+baseline latencies and remain there through the attack and recovery phases.
+No handshake failures were recorded for any algorithm during the partial
+handshake experiment at the tested load level (400 concurrent bots), as the
+server had sufficient thread and file descriptor headroom to accommodate both
+the held connections and incoming legitimate client requests.
+
+Key finding: The partial handshake attack's impact on client-perceived
+latency is confined to a single transient spike at attack initiation. Unlike
+the full handshake flood, which produces sustained degradation throughout
+the attack phase, the connection-holding strategy imposes no ongoing CPU
+burden. However, the magnitude of the initial spike still preserves the
+algorithm cost hierarchy: hybrid PQC algorithms suffer the most severe
+transient latency (10^10 cycles), followed by pure PQC (10^8 cycles), and
+classical X25519 (10^7 cycles). This demonstrates that even in a
+non-CPU-exhaustion attack scenario, the choice of cryptographic algorithm
+influences the severity of the initial connection storm's impact on service
+quality.
+
+The practical implication is that partial handshake attacks are less
+effective at degrading ongoing service for all algorithms but would become
+dangerous at higher bot counts where the total number of held connections
+exceeds the server's file descriptor or thread limits (typically governed
+by OS-level ulimit settings), at which point the server would be unable to
+accept new connections regardless of available CPU capacity.
+
+
+================================================================================
+END OF RESULTS EXPLANATION
+================================================================================

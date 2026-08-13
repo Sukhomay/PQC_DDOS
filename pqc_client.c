@@ -96,11 +96,11 @@ handshake_result_t do_handshake(SSL_CTX *ctx, const char *server_ip) {
         return result;
     }
 
-    // /* Set 5-second send/recv timeouts so we don't block forever
-    //    when the server is overwhelmed during DDoS */
-    // struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-    // setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    // setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    /* Set 5-second send/recv timeouts so we don't block forever
+       when the server is overwhelmed during DDoS */
+    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));

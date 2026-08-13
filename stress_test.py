@@ -6,9 +6,9 @@ Ramps up DDoS load in rounds until the server can no longer serve
 the legitimate client (denial of service achieved).
 
 Each round:
-  1. Launch bots with current thread count
+  1. Launch N bots with fixed T threads each (N doubles every round)
   2. Wait for load to saturate
-  3. Run a probe client with N handshakes
+  3. Run a probe client with P handshakes
   4. Analyze success/fail from client_metrics.csv
   5. Kill bots, record results
   6. If failure threshold exceeded → stop
@@ -17,7 +17,7 @@ Output: stress_results.csv with one row per round.
 
 Usage:
     python3 stress_test.py --server-ip 192.168.1.100
-    python3 stress_test.py --server-ip 10.0.0.1 --bots 5 --start-threads 5 --max-threads 200
+    python3 stress_test.py --server-ip 10.0.0.1 --start-bots 5 --threads 100 --max-bots 500
 """
 
 import argparse
@@ -82,9 +82,9 @@ def run_stress_test(args):
     print("  PQC TLS DDoS Stress Test (Incremental)")
     print("=" * 60)
     print(f"  Server IP         : {server_ip}")
-    print(f"  Bots              : {args.bots}")
-    print(f"  Start threads/bot : {args.start_threads}")
-    print(f"  Max threads/bot   : {args.max_threads}")
+    print(f"  Start bots        : {args.start_bots}")
+    print(f"  Max bots          : {args.max_bots}")
+    print(f"  Threads/bot       : {args.threads}")
     print(f"  Round duration    : {args.round_duration}s")
     print(f"  Probe handshakes  : {args.probe_count}")
     print(f"  Failure threshold : {args.failure_threshold * 100:.0f}%")
@@ -102,7 +102,7 @@ def run_stress_test(args):
         os.remove(client_csv)
 
     # Run probe client
-    probe_proc = subprocess.run(
+    subprocess.run(
         ["taskset", "-c", "0-3", client_bin, server_ip, "0", str(args.probe_count)],
         cwd=project_dir,
         stdout=subprocess.DEVNULL,
@@ -125,44 +125,51 @@ def run_stress_test(args):
     results_file = open(results_csv, "w")
     results_writer = csv.writer(results_file)
     results_writer.writerow([
-        "round", "threads_per_bot", "total_attackers",
+        "round", "num_bots", "threads_per_bot", "total_attackers",
         "probe_success", "probe_fail", "failure_rate",
         "avg_handshake_cycles"
     ])
     # Write baseline
     results_writer.writerow([
-        0, 0, 0,
+        0, 0, 0, 0,
         baseline_success, baseline_fail, f"{baseline_fail_rate:.4f}",
         baseline_avg
     ])
     results_file.flush()
 
     # ---- Incremental rounds ----
-    threads_per_bot = args.start_threads
+    num_bots = args.start_bots
     round_num = 0
     breaking_point = None
 
-    while threads_per_bot <= args.max_threads:
+    while num_bots <= args.max_bots:
         round_num += 1
-        total_attackers = args.bots * threads_per_bot
+        total_attackers = num_bots * args.threads
 
         print(f"\n{'='*60}")
-        print(f"  ROUND {round_num}: {args.bots} bots × {threads_per_bot} threads "
+        print(f"  ROUND {round_num}: {num_bots} bots × {args.threads} threads "
               f"= {total_attackers} attackers")
         print(f"{'='*60}")
 
         # Launch bots
         print(f"  Launching bots...")
         bot_procs = []
-        for i in range(args.bots):
-            proc = subprocess.Popen(
-                ["taskset", "-c", "4-11", bot_bin,
-                 str(threads_per_bot), str(args.mode), server_ip],
-                cwd=project_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            bot_procs.append(proc)
+        launch_failed = False
+        for i in range(num_bots):
+            try:
+                proc = subprocess.Popen(
+                    ["taskset", "-c", "4-11", bot_bin,
+                     str(args.threads), str(args.mode), server_ip],
+                    cwd=project_dir,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                bot_procs.append(proc)
+            except BlockingIOError:
+                print(f"  [!] Cannot launch bot {i} — OS resource limit hit")
+                launch_failed = True
+                break
+        print(f"  Launched {len(bot_procs)}/{num_bots} bots")
 
         # Warmup — let the attack saturate
         print(f"  Warmup ({args.warmup}s)...")
@@ -184,22 +191,27 @@ def run_stress_test(args):
             )
         except subprocess.TimeoutExpired:
             print(f"  [!] Probe timed out — server overwhelmed")
+        except BlockingIOError:
+            print(f"  [!] Cannot fork probe — system out of resources")
 
         # Parse results
         success, fail, avg_cycles = parse_client_metrics(client_csv)
+        total_completed = success + fail
+
+        # Count missing handshakes (probe didn't complete them) as failures
+        missing = args.probe_count - total_completed
+        if missing > 0:
+            fail += missing
+
         total = success + fail
         fail_rate = fail / total if total > 0 else 1.0
-
-        # If probe produced no results at all, that's a complete failure
-        if total == 0:
-            fail_rate = 1.0
 
         print(f"  Success: {success} | Fail: {fail} | "
               f"Failure rate: {fail_rate*100:.1f}% | Avg cycles: {avg_cycles}")
 
         # Record results
         results_writer.writerow([
-            round_num, threads_per_bot, total_attackers,
+            round_num, num_bots, args.threads, total_attackers,
             success, fail, f"{fail_rate:.4f}",
             avg_cycles
         ])
@@ -211,10 +223,15 @@ def run_stress_test(args):
 
         # Check failure threshold
         if fail_rate >= args.failure_threshold:
-            breaking_point = (round_num, threads_per_bot, total_attackers, fail_rate)
+            breaking_point = (round_num, num_bots, args.threads, total_attackers, fail_rate)
             print(f"\n  >>> FAILURE THRESHOLD REACHED <<<")
             print(f"  >>> Server denied at {total_attackers} attackers "
-                  f"({args.bots} bots × {threads_per_bot} threads)")
+                  f"({num_bots} bots × {args.threads} threads)")
+            break
+
+        # If we couldn't launch all bots, stop — we've hit resource limits
+        if launch_failed:
+            print(f"\n  [!] OS resource limit reached. Stopping test.")
             break
 
         # Cooldown before next round
@@ -222,7 +239,7 @@ def run_stress_test(args):
         time.sleep(args.cooldown)
 
         # Increase load for next round
-        threads_per_bot *= 2
+        num_bots *= 2
 
     results_file.close()
 
@@ -231,15 +248,15 @@ def run_stress_test(args):
     print(f"  STRESS TEST COMPLETE")
     print(f"{'='*60}")
     if breaking_point:
-        rnd, tpb, total, fr = breaking_point
+        rnd, bots, threads, total, fr = breaking_point
         print(f"  Server denied at round {rnd}")
         print(f"  Breaking point   : {total} attackers "
-              f"({args.bots} bots × {tpb} threads)")
+              f"({bots} bots × {threads} threads)")
         print(f"  Failure rate     : {fr*100:.1f}%")
     else:
         print(f"  Server survived all rounds up to "
-              f"{args.bots} × {args.max_threads} = "
-              f"{args.bots * args.max_threads} attackers")
+              f"{args.max_bots} × {args.threads} = "
+              f"{args.max_bots * args.threads} attackers")
     print(f"  Results saved to : {results_csv}")
     print(f"{'='*60}")
 
@@ -251,19 +268,19 @@ def main():
         epilog="""
 Examples:
   python3 stress_test.py --server-ip 192.168.1.100
-  python3 stress_test.py --server-ip 10.0.0.1 --bots 5 --start-threads 5 --max-threads 200
+  python3 stress_test.py --server-ip 10.0.0.1 --start-bots 5 --threads 100 --max-bots 500
   python3 stress_test.py --server-ip 10.0.0.1 --failure-threshold 0.5
         """,
     )
 
     parser.add_argument("--server-ip", type=str, required=True,
                         help="IP of the remote PQC TLS server")
-    parser.add_argument("--bots", type=int, default=5,
-                        help="Number of bot processes (default: 5)")
-    parser.add_argument("--start-threads", type=int, default=5,
-                        help="Starting threads per bot (default: 5)")
-    parser.add_argument("--max-threads", type=int, default=200,
-                        help="Max threads per bot (default: 200)")
+    parser.add_argument("--start-bots", type=int, default=5,
+                        help="Starting number of bot processes (default: 5)")
+    parser.add_argument("--max-bots", type=int, default=500,
+                        help="Max number of bot processes (default: 500)")
+    parser.add_argument("--threads", type=int, default=100,
+                        help="Threads per bot — fixed for all rounds (default: 100)")
     parser.add_argument("--mode", type=int, default=1, choices=[1, 2],
                         help="Attack mode: 1=full handshake, 2=partial (default: 1)")
     parser.add_argument("--round-duration", type=int, default=15,

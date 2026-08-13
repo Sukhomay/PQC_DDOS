@@ -1,0 +1,644 @@
+
+================================================================================
+  METHODOLOGY: Evaluating Post-Quantum Cryptographic TLS Servers Under
+                Distributed Denial-of-Service Attack Conditions
+================================================================================
+
+--------------------------------------------------------------------------------
+1. INTRODUCTION AND MOTIVATION
+--------------------------------------------------------------------------------
+
+The growing threat of quantum computing to classical cryptographic algorithms
+has spurred the standardisation of Post-Quantum Cryptography (PQC) by NIST.
+The primary candidates — CRYSTALS-Kyber (ML-KEM) and its hybrid variants
+combined with classical elliptic-curve groups — are now being integrated into
+TLS 1.3. However, a critical open question remains: do the additional
+computational requirements of PQC key encapsulation mechanisms (KEMs) make
+TLS servers more susceptible to Denial-of-Service (DDoS) attacks than
+classical counterparts?
+
+This project addresses that question by building a controlled experimental
+framework to measure the DDoS resilience of TLS servers configured with five
+distinct cryptographic algorithm profiles, ranging from classical X25519
+Elliptic-Curve Diffie-Hellman to pure PQC (ML-KEM-768, ML-KEM-1024) and
+hybrid combinations (SecP384r1+ML-KEM-768, SecP521r1+ML-KEM-1024).
+
+The core hypothesis is that servers performing heavier PQC handshakes will
+reach their denial-of-service tipping point at a lower attacker count than
+servers using lighter classical cryptography.
+
+--------------------------------------------------------------------------------
+2. CRYPTOGRAPHIC ALGORITHMS UNDER TEST
+--------------------------------------------------------------------------------
+
+Five TLS key-exchange configurations were evaluated:
+
+  (a) X25519 (Classical Baseline)
+      Standard Elliptic-Curve Diffie-Hellman using Curve25519. This is the
+      current industry default for TLS 1.3 key exchange and serves as the
+      performance baseline against which PQC algorithms are compared.
+
+  (b) ML-KEM-768 (Pure PQC, NIST Security Level 3)
+      CRYSTALS-Kyber at the 768-bit parameter set, offering quantum-resistant
+      key encapsulation at approximately 128-bit post-quantum security. This
+      is a pure PQC mode with no classical component.
+
+  (c) ML-KEM-1024 (Pure PQC, NIST Security Level 5)
+      CRYSTALS-Kyber at the 1024-bit parameter set, offering approximately
+      256-bit post-quantum security. The larger parameters result in heavier
+      key generation, encapsulation, and decapsulation operations.
+
+  (d) SecP384r1 + ML-KEM-768 (Hybrid PQC)
+      A hybrid key exchange combining NIST P-384 elliptic-curve with
+      ML-KEM-768. Both algorithms contribute entropy to the shared secret,
+      providing quantum resistance while maintaining classical security. The
+      combined handshake is significantly more computationally intensive.
+
+  (e) SecP521r1 + ML-KEM-1024 (Hybrid PQC, Highest Security)
+      A hybrid combining NIST P-521 elliptic-curve with ML-KEM-1024.
+      This configuration offers the highest security level tested but also
+      carries the greatest per-handshake computational cost.
+
+All algorithms were configured as TLS 1.3 key-exchange groups using OpenSSL's
+SSL_CTX_set1_groups_list() API. The OQS Provider for OpenSSL was used to
+supply the PQC algorithm implementations.
+
+--------------------------------------------------------------------------------
+3. SOFTWARE STACK AND DEPENDENCIES
+--------------------------------------------------------------------------------
+
+3.1 OpenSSL with OQS Provider
+------------------------------
+Standard OpenSSL does not support PQC algorithms. The Open Quantum Safe (OQS)
+project provides liboqs, a portable C library implementing PQC algorithms, and
+oqsprovider, an OpenSSL provider plugin that exposes these algorithms through
+OpenSSL's standard provider API.
+
+The experimental build was installed at /opt/oqs-openssl, with all binaries
+linked against this custom installation:
+
+    OPENSSL_ROOT = /opt/oqs-openssl
+    CFLAGS  = -Wall -O2 -I$(OPENSSL_ROOT)/include
+    LDFLAGS = -L$(OPENSSL_ROOT)/lib64 -Wl,-rpath=$(OPENSSL_ROOT)/lib64
+              -lssl -lcrypto -lpthread
+
+At runtime, both the "default" and "oqsprovider" OpenSSL providers are loaded:
+
+    OSSL_PROVIDER_load(NULL, "default");
+    OSSL_PROVIDER_load(NULL, "oqsprovider");
+
+3.2 Central Configuration Header (SETUP.h)
+-------------------------------------------
+A shared header file (SETUP.h) defines all experiment parameters in one place,
+ensuring consistent configuration across all components:
+
+    #define PORT            4443
+    #define HANDSHAKE_ALGO  "p384_mlkem768"   /* changed per test run */
+    #define SIGNATURE_ALGO  "p384_mldsa65"
+    #define CERT_FILE       "server.crt"
+    #define KEY_FILE        "server.key"
+
+The HANDSHAKE_ALGO macro is changed to one of:
+    x25519, mlkem768, mlkem1024, p384_mlkem768, p521_mlkem1024
+
+before recompiling for each algorithm test. This approach guarantees that the
+only variable between experiments is the cryptographic algorithm.
+
+3.3 Performance Measurement: RDTSCP
+-------------------------------------
+Handshake latency is measured using the x86 RDTSCP instruction, which reads
+the processor's Time Stamp Counter (TSC). The TSC increments at a fixed rate
+tied to the processor frequency, making it a high-resolution, low-overhead
+timer suitable for measuring sub-millisecond cryptographic operations:
+
+    static __inline__ uint64_t rdtscp() {
+        unsigned int lo, hi;
+        __asm__ __volatile__ (
+            "rdtscp" : "=a"(lo), "=d"(hi) :: "%rcx"
+        );
+        return ((uint64_t)hi << 32) | lo;
+    }
+
+Cycle counts are recorded by calling rdtscp() immediately before and after
+SSL_accept() on the server and SSL_connect() on the client.
+
+3.4 Certificate Generation (pqc_gen.c)
+----------------------------------------
+A dedicated certificate generation utility (pqc_gen.c) creates a self-signed
+X.509 certificate using the PQC signature algorithm p384_mldsa65 (a hybrid of
+NIST P-384 and ML-DSA-65). The certificate is valid for 365 days and includes
+Subject Alternative Names for localhost, 127.0.0.1, and the server's LAN IP
+(10.145.231.154). Certificate fields identify the organization as:
+Country=IN, State=WestBengal, Locality=Kharagpur, Organization=IIT,
+Unit=CryptoLab. The same certificate is reused across all algorithm tests —
+only the key-exchange group changes.
+
+--------------------------------------------------------------------------------
+4. SYSTEM ARCHITECTURE
+--------------------------------------------------------------------------------
+
+The experiment framework consists of three distinct components:
+
+4.1 PQC TLS Server (pqc_server.c)
+-----------------------------------
+The server is a multi-threaded TLS 1.3 server built directly on OpenSSL's
+socket and SSL APIs. Its design principles are:
+
+  Thread-per-connection model: Each accepted TCP connection spawns a new
+  POSIX thread (pthread_create + pthread_detach) to handle the TLS handshake.
+  This is the simplest model that allows simultaneous handshakes, at the cost
+  of linear thread growth with connection count.
+
+  Non-blocking accept loop: The main thread runs a tight accept() loop with no
+  rate limiting. The server will accept connections as fast as the OS allows,
+  making it a realistic target for handshake-flood attacks.
+
+  Connection backlog of 1000: The listen() call uses a backlog of 1000, meaning
+  up to 1000 pending connections can queue before new ones are rejected.
+
+  Atomic metrics tracking: Five volatile counters are maintained under a single
+  pthread_mutex_t:
+    - total_connections       (cumulative accepted TCP connections)
+    - active_connections      (currently in-handshake or connected)
+    - successful_handshakes   (SSL_accept returned > 0)
+    - failed_handshakes       (SSL_accept returned <= 0)
+    - total_handshake_cycles  (sum of rdtscp differences for successes)
+
+  Broken-pipe suppression: SIGPIPE is set to SIG_IGN and OpenSSL error logging
+  for failed handshakes is suppressed. During a DDoS, bots are forcibly killed,
+  causing large numbers of broken-pipe errors that would otherwise flood the
+  terminal and slow the server.
+
+  SSL_OP_IGNORE_UNEXPECTED_EOF option is set on the SSL context to handle
+  abrupt bot disconnections gracefully without treating them as fatal errors.
+
+4.2 Metrics Logger Thread
+---------------------------
+A dedicated background thread (metrics_logger) wakes every second and appends
+one row to metrics.csv:
+
+    timestamp, total_connections, active_connections,
+    successful_handshakes, failed_handshakes, avg_handshake_cycles
+
+The average handshake cycles field is computed as:
+    avg_cycles = total_handshake_cycles / successful_handshakes
+
+This is a cumulative average across the entire run, not a per-second window.
+This design choice means the metric integrates historical load, making it
+stable but slow to reflect instantaneous changes.
+
+4.3 Probe Client (pqc_client.c)
+---------------------------------
+The probe client performs individual TLS handshakes sequentially, logging each
+result to client_metrics.csv with columns:
+    timestamp, handshake_num, status (success/fail), handshake_cycles
+
+Key design decisions:
+  - 5-second socket timeouts (SO_SNDTIMEO, SO_RCVTIMEO) on every socket.
+    Without this, connect() or SSL_connect() would block indefinitely when
+    the server is overwhelmed, making it impossible to distinguish a slow
+    server from a down server.
+  - SSL_VERIFY_NONE is used for certificate verification. Since the server
+    certificate's SAN includes specific IPs and the test network may assign
+    dynamic addresses, hostname verification is disabled. The full PQC
+    handshake (ML-KEM key exchange + ML-DSA signature verification) still
+    executes; only the IP/hostname match step is skipped.
+  - Configurable interval between handshakes (interval_ms parameter) and
+    configurable total handshake count.
+  - CPU pinning via taskset -c 0-3 is applied by the orchestrator, isolating
+    the probe client to physical cores 0-3 and preventing resource contention
+    with bot processes.
+
+4.4 Attack Bot (pqc_bot.c)
+----------------------------
+The bot is a multi-threaded TLS handshake flooder. Each bot process spawns N
+threads (configurable), and each thread runs an infinite loop:
+    connect -> SSL_connect -> SSL_shutdown -> repeat
+
+Two attack modes are supported:
+
+  Mode 1 (Full Handshake Flood): Each bot thread completes the full TLS
+  handshake including certificate verification. This is the most
+  computationally expensive attack for the server because each connection
+  requires the server to perform a full key encapsulation and signature
+  operation. This was the primary mode used in all experiments.
+
+  Mode 2 (Partial Handshake): Each thread initiates SSL_do_handshake() but
+  then sleeps for 100 seconds, holding the connection open without completing.
+  This is a connection-exhaustion attack analogous to Slowloris.
+
+The bot does not impose any delay between connection attempts. Failed
+connections (e.g., refused connections) are retried immediately. The bot is
+pinned to CPU cores 4-11 by the orchestrator to separate its CPU usage from
+the probe client.
+
+--------------------------------------------------------------------------------
+5. EXPERIMENTAL EVOLUTION: FROM EMULATION TO BARE-METAL
+--------------------------------------------------------------------------------
+
+5.1 Phase 1: Mininet Network Emulation
+----------------------------------------
+The initial experimental phase used Mininet, a software-defined network
+emulator, to create a simulated multi-host topology on a single physical
+machine. Mininet virtualizes hosts using Linux network namespaces and a
+software OpenVSwitch, allowing realistic IP-separated network communication
+between hosts running on the same machine.
+
+The topology (controller.py, class AttackTopo) creates a star topology:
+    - One server host ("server")
+    - One client host ("client")
+    - N bot hosts ("bot0" through "botN-1")
+    All connected through a single OVSSwitch ("s1") using TCLink.
+
+TCLink enabled precise control of network conditions between hosts:
+    --bw    : link bandwidth in Mbps
+    --delay : propagation delay (e.g., "20ms")
+    --loss  : packet loss percentage
+
+The controller.py script orchestrated a 3-phase experiment automatically:
+  Phase 1 (Baseline):  Client runs alone with no bots for baseline_dur seconds.
+  Phase 2 (Attack):    All bot hosts launch their bot binaries simultaneously.
+  Phase 3 (Recovery):  Bots are killed; client continues for recovery_dur seconds.
+
+Total duration was split equally: baseline_dur = attack_dur = duration / 3,
+with recovery_dur absorbing any remainder.
+
+Limitation of the Mininet approach: Since all processes share the same physical
+machine's CPU, memory, and kernel, the server's performance under DDoS was
+contaminated by resource competition from the bots running on the same machine.
+High bot thread counts caused the entire system to slow down, not just the
+server. This made it impossible to isolate server-side crypto overhead from
+OS-level scheduling interference.
+
+5.2 Phase 2: Bare-Metal Distributed Testing
+---------------------------------------------
+To overcome the limitations of emulation, the experiment was migrated to a
+two-machine setup:
+
+  Server machine: Runs pqc_server continuously in the background.
+    IP: 10.5.15.83
+    The server is the only process consuming server-side CPU, making
+    measurements of handshake latency and failure rate directly attributable
+    to the cryptographic workload.
+
+  Client/Attack machine: Runs attack.py and pqc_client.
+    The attack.py script launches bot processes and the probe client,
+    communicating with the server over the physical LAN.
+
+This architecture provides clean isolation: bot CPU usage does not affect
+server performance measurements, and network traffic travels over real Ethernet
+rather than software-emulated links. The server metrics (metrics.csv) and
+client probe results (client_metrics.csv) are collected independently on their
+respective machines.
+
+The attack.py script replicates the 3-phase structure of controller.py but
+without Mininet. The same phase-duration logic applies:
+  Phase 1 (Baseline):   Client connects alone for baseline_dur seconds.
+  Phase 2 (Attack):     Bots launched; client continues probing.
+  Phase 3 (Recovery):   Bots killed; client probes server recovery.
+
+The default total duration of 45 seconds (15s per phase) was chosen based on
+empirical observation during the Mininet phase:
+  - 15 seconds of baseline allows the client to complete 10-30 sequential
+    handshakes (at 500ms interval) — sufficient to establish stable baseline
+    cycle counts.
+  - 15 seconds of attack allows bot threads to fully saturate the server's
+    accept queue and thread pool, pushing it into its stressed state.
+  - 15 seconds of recovery captures whether the server returns to normal
+    service after the attack ends.
+    
+This 3 x 15s = 45s total duration balances experiment thoroughness with
+practical runtime constraints. Shorter phases would not allow load to stabilise;
+longer phases would make the experiment impractically slow to iterate.
+
+--------------------------------------------------------------------------------
+6. INCREMENTAL STRESS TESTING METHODOLOGY
+--------------------------------------------------------------------------------
+
+6.1 Motivation
+---------------
+The 3-phase experiment (attack.py) measures server behaviour at a fixed attack
+intensity. To find the specific attacker count at which the server transitions
+from functional to denied (the "breaking point"), an incremental stress test
+framework was developed (stress_test.py).
+
+6.2 Round-Based Load Ramping
+------------------------------
+The stress test operates in rounds. In each round:
+  1. N bot processes are launched, each with T threads (N bots × T threads
+     total concurrent attack connections).
+  2. A warmup period (default: 5 seconds) allows the attack to saturate.
+  3. A probe client attempts exactly P handshakes (default: 100) against
+     the server while under attack.
+  4. The probe results are parsed from client_metrics.csv.
+  5. All bots are killed.
+  6. A cooldown period (default: 3 seconds) allows sockets to drain.
+  7. If the failure rate exceeds the threshold, the test stops.
+
+The load is determined using an adaptive heuristic strategy to efficiently
+identify the server's breaking point. The number of bot processes is typically
+fixed (e.g., to 40 bots), while the number of threads per bot is varied 
+dynamically. 
+
+The heuristic strategy involves:
+  a) Coarse-grained exploration: Probing at wide intervals to identify the 
+     order of magnitude of the failure point.
+  b) Exponential growth matching: Assuming that the failure rate follows an 
+     exponential curve as load increases, we can fit a model to early failure
+     indicators to predict the exact threshold.
+  c) Targeted probing: Using the predictive model to calculate an exact 
+     number of attackers (which must be a multiple of the fixed bot count) 
+     at which the 80% failure threshold is expected to be reached.
+
+This heuristic approach allows us to find the specific breaking point, 
+calculated as a direct multiple of the running bots, without the exhaustive 
+time required by a linear ramp-up or fine-grained manual testing.
+
+6.3 The 80% Failure Threshold
+-------------------------------
+The server is declared to have reached denial-of-service when:
+
+    failure_rate >= 0.80  (i.e., 80% of probe handshakes fail)
+
+This threshold was chosen for the following reasons:
+
+  Practical DoS definition: In practice, a service is considered "down" when
+  it is unable to serve the vast majority of legitimate users. An 80% failure
+  rate means only 1 in 5 legitimate connections succeed — effectively
+  inoperative from a user perspective.
+
+  Robustness against transient failures: A lower threshold (e.g., 50%) would
+  be triggered by random packet loss, transient congestion, or probe timing
+  variance. 80% ensures the threshold is only crossed under genuine server
+  saturation.
+
+  Accounting for incomplete probes: Beyond explicit failures (where the client
+  returns a "fail" status), "missing" handshakes are also counted as failures.
+  A missing handshake occurs when the probe client's total count of completed
+  handshakes (success + fail) is less than the requested probe count P. This
+  happens when the server is so overwhelmed that the probe's 5-second socket
+  timeout fires for every connection attempt, preventing the probe from
+  completing all P handshakes within the round duration.
+
+  Formula:
+      missing = P - (success + fail)
+      effective_fail = fail + missing
+      failure_rate = effective_fail / P
+
+6.4 Probe Count Selection
+---------------------------
+The default probe count of 100 handshakes per round was chosen to balance
+statistical confidence with practical runtime:
+  - 100 probes gives a resolution of 1% in the failure rate measurement.
+  - At baseline speeds (~65M cycles ≈ ~18ms per handshake for hybrid algos),
+    100 sequential handshakes take approximately 1-2 seconds.
+  - Under attack, each probe may take up to 5 seconds (socket timeout), so
+    100 probes could take up to 500 seconds in the worst case. The round
+    timeout (args.round_duration + 30 seconds) terminates the probe early in
+    this scenario, and missing handshakes are counted as failures.
+
+6.5 CPU Pinning (taskset)
+---------------------------
+All processes are CPU-pinned using the Linux taskset utility:
+
+  Probe client: taskset -c 0-3 (physical cores 0-3)
+  Bot processes: taskset -c 4-11 (physical cores 4-11)
+
+This ensures:
+  - The probe client always has dedicated CPU cores and is not starved by bots.
+  - Bot processes do not compete with the probe client for CPU time.
+  - Measurements of probe handshake latency reflect server-side bottlenecks,
+    not client-side CPU starvation.
+
+On the server machine, no CPU pinning is applied — the server uses all
+available cores, which is realistic for a production deployment.
+
+6.6 OS Resource Limit Handling
+--------------------------------
+At high thread counts, the Linux kernel imposes limits on the number of
+threads a user process can spawn (typically controlled by ulimit -u). When
+these limits are reached, the fork() syscall underlying subprocess.Popen()
+raises a BlockingIOError (errno 11: Resource temporarily unavailable).
+
+The stress test handles this gracefully:
+  - Each bot launch is wrapped in a try/except BlockingIOError block.
+  - If a bot cannot be launched, the test records how many bots were
+    successfully launched and proceeds with the partial set.
+  - After the round completes, if any bot failed to launch, the test stops
+    rather than attempting higher loads that would also fail.
+
+This design ensures the test terminates cleanly even when hitting OS limits,
+preserving valid data from all rounds that did complete successfully.
+
+--------------------------------------------------------------------------------
+7. DATA COLLECTION AND LOGGING
+--------------------------------------------------------------------------------
+
+7.1 Server-Side Metrics (metrics.csv)
+---------------------------------------
+The server logs one row per second throughout its lifetime. Each row contains:
+  - timestamp:              Unix timestamp (seconds)
+  - total_connections:      Cumulative TCP connections accepted
+  - active_connections:     Connections currently being handled
+  - successful_handshakes:  Cumulative successful SSL_accept() calls
+  - failed_handshakes:      Cumulative failed SSL_accept() calls
+  - avg_handshake_cycles:   Running average (total_cycles / successful)
+
+The metrics CSV file is reset at server startup and grows continuously.
+After each algorithm test, the metrics.csv is renamed and saved
+(e.g., mlkem768_metrics.csv) for post-hoc analysis.
+
+7.2 Client-Side Metrics (client_metrics.csv)
+----------------------------------------------
+The probe client logs one row per completed handshake attempt:
+  - timestamp:          Unix timestamp of the attempt
+  - handshake_num:      Sequential handshake counter
+  - status:             "success" or "fail"
+  - handshake_cycles:   rdtscp-measured cycles for the attempt
+
+This per-handshake log enables fine-grained analysis of latency distribution
+across the three experiment phases (baseline, attack, recovery).
+
+7.3 Stress Test Summary (stress_results.csv)
+----------------------------------------------
+The stress_test.py script produces a summary CSV with one row per round:
+  - round:                Round number (0 = baseline)
+  - num_bots:             Number of bot processes launched
+  - threads_per_bot:      Threads per bot process
+  - total_attackers:      num_bots × threads_per_bot
+  - probe_success:        Successful probe handshakes
+  - probe_fail:           Failed probe handshakes (including missing)
+  - failure_rate:         Fraction of probes that failed
+  - avg_handshake_cycles: Average cycles per successful probe handshake
+
+--------------------------------------------------------------------------------
+8. ANALYSIS METHODOLOGY
+--------------------------------------------------------------------------------
+
+8.1 Breaking Point Determination
+----------------------------------
+The breaking point for each algorithm is defined as the total attacker count
+(num_bots × threads_per_bot) at which the probe failure rate first reaches or
+exceeds 80%. For algorithms where the test completed naturally, this is directly
+observed from the stress_results.csv data.
+
+8.2 Handshake Cycle Metrics
+-----------------------------
+Average handshake cycles are recorded from both server-side (metrics.csv) and
+client-side (client_metrics.csv) perspectives:
+
+  Server-side: Measures the time from the server calling SSL_accept() to
+  either success or failure. Under heavy load, this includes queueing time
+  as the server's thread pool becomes saturated.
+
+  Client-side: Measures the time from SSL_connect() start to either a
+  successful handshake or a timeout/failure. This is the end-to-end latency
+  experienced by a legitimate client during the attack.
+
+The client-side cycle count includes network round-trip time, making it higher
+than the server-side measure in absolute terms but more representative of user
+experience.
+
+8.3 Failure Rate Progression
+------------------------------
+For each algorithm, the failure rate at each round is plotted against the
+total attacker count. The shape of this curve reveals:
+  - The resilience range: the load range over which the server transitions
+    from stable to failed.
+  - The steepness: a steeper curve indicates a sharper transition (more
+    sudden collapse); a gradual curve indicates graceful degradation.
+
+8.4 Visualisation
+------------------
+Three plots are generated for cross-algorithm comparison:
+
+  (a) Failure Rate vs. Total Attackers: Log-scale x-axis showing the
+      failure rate curve for each algorithm. Allows direct comparison of
+      which algorithm reaches the 80% threshold at the lowest load.
+
+  (b) Avg Handshake Cycles vs. Time: Using server-side metrics.csv data,
+      shows how handshake latency evolves over the course of each 45-second
+      experiment (baseline, attack, recovery phases).
+
+  (c) Breaking Point Bar Chart: A horizontal bar chart comparing the
+      breaking point (in total attackers) across all five algorithms,
+      providing an at-a-glance resilience ranking.
+
+--------------------------------------------------------------------------------
+9. EXPERIMENTAL PARAMETERS SUMMARY
+--------------------------------------------------------------------------------
+
+The following table summarises the final parameters used for each algorithm
+in the incremental stress test (stress_test.py):
+
+Algorithm              | Bots | Start Threads | Max Threads | Probe Count
+-----------------------|------|---------------|-------------|------------
+SecP384r1+MLKEM-768    |  20  |       5       |    1200     |    100
+SecP521r1+MLKEM-1024   |  20  |       5       |     200     |     20
+MLKEM-768              |  40  |      10       |    3000     |    100
+MLKEM-1024             |  20  |      10       |    3000     |    100
+X25519                 |  40  |      10       |    3000     |    100
+
+Common parameters across all runs:
+  Server IP:          10.5.15.83
+  Port:               4443
+  Warmup per round:   5 seconds
+  Cooldown per round: 3 seconds
+  Failure threshold:  80%
+  Attack mode:        1 (full handshake flood)
+  Bot CPU cores:      4-11
+  Client CPU cores:   0-3
+
+For the 3-phase qualitative experiment (attack.py / controller.py):
+  Total duration:     45 seconds
+  Phase duration:     15 seconds each (baseline, attack, recovery)
+  Client interval:    500 ms between handshakes
+  Bot threads:        5-20 per bot process (varied per test)
+
+--------------------------------------------------------------------------------
+10. LIMITATIONS AND DESIGN CONSTRAINTS
+--------------------------------------------------------------------------------
+
+10.1 OS Thread Limits
+----------------------
+The primary practical limitation encountered during testing was the OS-level
+thread limit on the attack machine. Linux systems restrict the total number of
+threads a user can create (controlled by /proc/sys/kernel/threads-max and
+ulimit -u). On the test machines, this limit was in the range of 30,000-65,000
+total threads. At high bot counts with many threads per bot, this limit was
+reached before the server reached its breaking point for lighter algorithms
+(MLKEM-768, MLKEM-1024, X25519).
+
+Attempts to increase the limit via `ulimit -u` were rejected by the OS due
+to insufficient privileges. This constraint meant that for the lighter
+algorithms, the attacker count was bounded by the attack machine's capacity
+rather than the server's capacity.
+
+10.2 Cumulative vs. Instantaneous Metrics
+-------------------------------------------
+The server's avg_handshake_cycles metric is a cumulative average, not a
+sliding window. As a result, post-attack recovery appears as a very slow
+decline rather than an immediate return to baseline — the large number of
+slow handshakes during the attack phase permanently elevate the running
+average even after normal operation resumes.
+
+10.3 Single-Link Network
+--------------------------
+The bare-metal setup uses a standard LAN connection between two machines.
+Network capacity was not a bottleneck at the tested load levels — the
+performance limits were entirely CPU-bound (server-side handshake processing).
+In a real-world DDoS scenario, the attack traffic would originate from
+geographically distributed sources with varying network characteristics.
+
+10.4 Sequential Probe Client
+------------------------------
+The probe client issues handshakes sequentially (one at a time) rather than
+concurrently. This means that if the server is very slow but not completely
+down, the probe may take longer than the warmup period, potentially probing
+at a different load level than intended. The 5-second socket timeout partially
+mitigates this by bounding the time spent per failed handshake.
+
+10.5 Self-Signed Certificate
+------------------------------
+A self-signed certificate is used, and client-side hostname/IP verification
+is disabled (SSL_VERIFY_NONE in pqc_client.c). This is acceptable for the
+purposes of measuring handshake throughput under load, as the full
+cryptographic operations (key encapsulation, signature generation and
+verification) still execute. Only the hostname matching step is skipped.
+
+--------------------------------------------------------------------------------
+11. REPRODUCIBILITY
+--------------------------------------------------------------------------------
+
+To reproduce the experiments:
+
+  1. Install the OQS-enabled OpenSSL build at /opt/oqs-openssl.
+
+  2. Edit SETUP.h to set the desired HANDSHAKE_ALGO.
+
+  3. Build all components:
+       make pqc-gen          (generates server.crt and server.key)
+       make pqc-all          (builds pqc_server, pqc_client, bot)
+
+  4. On the server machine, start the server:
+       ./pqc_server
+
+  5. On the client machine, run the stress test:
+       python3 stress_test.py --server-ip <SERVER_IP> \
+           --bots <N> --start-threads <T> --probe-count 100
+
+  6. Save the resulting metrics.csv and stress_results.csv with a descriptive
+     name for the algorithm being tested.
+
+  7. Repeat steps 2-6 for each algorithm variant.
+
+  8. Use the plotting scripts (plot.py, plot_server.py, extrapolate.py)
+     to generate comparative visualisations from the collected CSV files.
+
+All source files (pqc_server.c, pqc_client.c, pqc_bot.c, pqc_gen.c,
+controller.py, attack.py, stress_test.py) are version-controlled in the
+PQC_DDOS project repository.
+
+================================================================================
+END OF METHODOLOGY REPORT
+================================================================================

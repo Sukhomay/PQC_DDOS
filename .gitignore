@@ -7,3 +7,5 @@ bot
 pqc_gen
 metrics.csv
 metrics1.csv
+server.key
+server.crt
